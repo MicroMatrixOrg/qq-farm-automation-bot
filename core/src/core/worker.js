@@ -12,7 +12,7 @@ const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, 
 const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, runBadOnceOnStartup, isHelpExpLimitReached, getFriendsList, getFriendLandsDetail, doFriendOperation } = require('../services/friend');
 const { getInteractRecords } = require('../services/interact');
 const { processInviteCodes } = require('../services/invite');
-const { autoBuyOrganicFertilizer, autoBuyFertilizer, buyFreeGifts, getFreeGiftDailyState } = require('../services/mall');
+const { autoBuyOrganicFertilizer, autoBuyFertilizer, checkAndBuyFertilizerBoth, buyFreeGifts, getFreeGiftDailyState } = require('../services/mall');
 const { performDailyMonthCardGift, getMonthCardDailyState } = require('../services/monthcard');
 const { performDailyVipGift, getVipDailyState } = require('../services/qqvip');
 const { createScheduler, getSchedulerRegistrySnapshot } = require('../services/scheduler');
@@ -621,9 +621,6 @@ async function handleApiCall(msg) {
             case 'doFriendOp':
                 result = await doFriendOperation(args[0], args[1]);
                 break;
-            case 'doBatchFriendOp':
-                result = await require('../services/friend').doBatchFriendOp(args[0]);
-                break;
             case 'getSeeds':
                 result = await getAvailableSeeds();
                 break;
@@ -659,6 +656,11 @@ async function handleApiCall(msg) {
                 const fertilizerType = args[0] || 'organic';
                 const fertilizerCount = Number(args[1]) || 0;
                 result = await autoBuyFertilizer(true, fertilizerType, fertilizerCount);
+                break;
+            }
+            case 'checkAndBuyFertilizer': {
+                const options = args[0] || {};
+                result = await checkAndBuyFertilizerBoth(options);
                 break;
             }
             case 'getAnalytics': {
@@ -769,7 +771,7 @@ function syncStatus() {
         farmRemainSec,
         helpRemainSec,
         stealRemainSec,
-        friendRemainSec: Math.min(helpRemainSec, stealRemainSec),
+        friendRemainSec: Math.max(helpRemainSec, stealRemainSec),
     };
 
     fullStats.automation = getAutomation();

@@ -63,6 +63,7 @@ const DEFAULT_FERTILIZER_LAND_TYPES = ['gold', 'black', 'red', 'normal'];
 const FERTILIZER_LAND_TYPE_SET = new Set(DEFAULT_FERTILIZER_LAND_TYPES);
 const INTERVAL_MAX_SEC = 86400;
 const DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC = 300;
+const DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC = 60;
 
 function normalizeKnownFriendGids(input, fallback = []) {
     const source = Array.isArray(input) ? input : fallback;
@@ -80,6 +81,12 @@ function normalizeKnownFriendGidSyncCooldownSec(input, fallback = DEFAULT_KNOWN_
     const value = Number.parseInt(input, 10);
     const base = Number.isFinite(value) ? value : fallback;
     return Math.max(30, Math.min(INTERVAL_MAX_SEC, base));
+}
+
+function normalizeFriendsListCacheTtlSec(input, fallback = DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC) {
+    const value = Number.parseInt(input, 10);
+    const base = Number.isFinite(value) ? value : fallback;
+    return Math.max(10, Math.min(INTERVAL_MAX_SEC, base));
 }
 
 function normalizeBagSeedPriority(input) {
@@ -129,34 +136,35 @@ const DEFAULT_ACCOUNT_CONFIG = {
         // month_card: true,
         // open_server_gift: true,
         fertilizer_gift: false,
-        fertilizer_buy: false,
+        fertilizer_buy_organic: false,
+        fertilizer_buy_normal: false,
         sell: false,
         fertilizer: 'smart',
         fertilizer_multi_season: true,
         fertilizer_land_types: [...DEFAULT_FERTILIZER_LAND_TYPES],
         fertilizer_smart_seconds: 300,
         skip_own_weed_bug: true,  // 不除自己草虫
-        fast_harvest: false,  // 秒收取开关
     },
     plantingStrategy: 'max_exp',
     preferredSeedId: 0,
     intervals: {
         farm: 2,
-        farmMin: 5,
-        farmMax: 10,
+        farmMin: 20,
+        farmMax: 25,
         // 好友巡查：帮助和偷菜各自独立的间隔
-        helpMin: 10,
-        helpMax: 15,
-        stealMin: 10,
-        stealMax: 15,
+        helpMin: 20,
+        helpMax: 25,
+        stealMin: 20,
+        stealMax: 25,
     },
     friendQuietHours: {
         enabled: false,
-        start: '23:00',
-        end: '07:00',
+        start: '01:00',
+        end: '07:30',
     },
     knownFriendGids: [],
     knownFriendGidSyncCooldownSec: DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
+    friendsListCacheTtlSec: DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC,
     friendBlacklist: [],
     // 蔬菜黑名单（偷菜时不偷的作物 seedId 列表）
     plantBlacklist: [
@@ -174,12 +182,16 @@ const DEFAULT_ACCOUNT_CONFIG = {
     plantOrderRandom: true,
     // 自己农田种植时每块地间隔秒数（0=使用默认50ms）
     plantDelaySeconds: 2,
-    // 秒收取提前时间（毫秒），默认提前200ms发起请求
-    fastHarvestAdvanceMs: 200,
-    // 化肥购买类型：organic（有机）或 normal（无机）
-    fertilizerBuyType: 'normal',
-    // 化肥购买数量（0=不限制，购买到点券不足为止）
-    fertilizerBuyCount: 10,
+    // 有机化肥购买数量
+    fertilizerBuyOrganicCount: 1,
+    // 有机化肥自动购买触发阈值（小时）
+    fertilizerBuyOrganicThresholdHours: 10,
+    // 无机化肥购买数量
+    fertilizerBuyNormalCount: 1,
+    // 无机化肥自动购买触发阈值（小时）
+    fertilizerBuyNormalThresholdHours: 10,
+    // 化肥自动购买检测间隔（分钟）
+    fertilizerBuyCheckIntervalMinutes: 60,
     // 背包种子优先顺序（seedId 数组）
     bagSeedPriority: [],
     // 背包种子用完后的回退策略
@@ -195,6 +207,7 @@ let accountFallbackConfig = {
     friendQuietHours: { ...DEFAULT_ACCOUNT_CONFIG.friendQuietHours },
     knownFriendGids: [],
     knownFriendGidSyncCooldownSec: DEFAULT_KNOWN_FRIEND_GID_SYNC_COOLDOWN_SEC,
+    friendsListCacheTtlSec: DEFAULT_FRIENDS_LIST_CACHE_TTL_SEC,
 };
 
 const globalConfig = {
@@ -294,15 +307,10 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
 
     const knownFriendGids = normalizeKnownFriendGids(base.knownFriendGids);
     const knownFriendGidSyncCooldownSec = normalizeKnownFriendGidSyncCooldownSec(base.knownFriendGidSyncCooldownSec);
+    const friendsListCacheTtlSec = normalizeFriendsListCacheTtlSec(base.friendsListCacheTtlSec);
 
     // 蔬菜黑名单
     const rawPlantBlacklist = Array.isArray(base.plantBlacklist) ? base.plantBlacklist : [];
-
-    // 化肥购买类型
-    const allowedBuyTypes = ['organic', 'normal'];
-    const fertilizerBuyType = allowedBuyTypes.includes(base.fertilizerBuyType)
-        ? base.fertilizerBuyType
-        : DEFAULT_ACCOUNT_CONFIG.fertilizerBuyType;
 
     return {
         ...base,
@@ -311,6 +319,7 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
         friendQuietHours: { ...(base.friendQuietHours || DEFAULT_ACCOUNT_CONFIG.friendQuietHours) },
         knownFriendGids,
         knownFriendGidSyncCooldownSec,
+        friendsListCacheTtlSec,
         friendBlacklist: rawBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0),
         plantingStrategy: ALLOWED_PLANTING_STRATEGIES.includes(String(base.plantingStrategy || ''))
             ? String(base.plantingStrategy)
@@ -320,9 +329,11 @@ function cloneAccountConfig(base = DEFAULT_ACCOUNT_CONFIG) {
         stealDelaySeconds: Math.max(0, Math.min(300, Number(base.stealDelaySeconds) || 0)),
         plantOrderRandom: !!(base.plantOrderRandom),
         plantDelaySeconds: Math.max(0, Math.min(60, Number(base.plantDelaySeconds) || 0)),
-        fastHarvestAdvanceMs: Math.max(50, Math.min(1000, Number(base.fastHarvestAdvanceMs) || 200)),
-        fertilizerBuyType,
-        fertilizerBuyCount: Math.max(0, Math.min(10000, Number(base.fertilizerBuyCount) || 0)),
+        fertilizerBuyOrganicCount: Math.max(0, Math.min(10000, Number(base.fertilizerBuyOrganicCount) || 0)),
+        fertilizerBuyOrganicThresholdHours: Math.max(0, Math.min(990, Number(base.fertilizerBuyOrganicThresholdHours) || 0)),
+        fertilizerBuyNormalCount: Math.max(0, Math.min(10000, Number(base.fertilizerBuyNormalCount) || 0)),
+        fertilizerBuyNormalThresholdHours: Math.max(0, Math.min(990, Number(base.fertilizerBuyNormalThresholdHours) || 0)),
+        fertilizerBuyCheckIntervalMinutes: Math.max(1, Math.min(1440, Number(base.fertilizerBuyCheckIntervalMinutes) || 30)),
         bagSeedPriority: normalizeBagSeedPriority(base.bagSeedPriority),
         bagSeedFallbackStrategy: normalizeBagSeedFallbackStrategy(base.bagSeedFallbackStrategy),
     };
@@ -397,6 +408,13 @@ function normalizeAccountConfig(input, fallback = accountFallbackConfig) {
         );
     }
 
+    if (src.friendsListCacheTtlSec !== undefined) {
+        cfg.friendsListCacheTtlSec = normalizeFriendsListCacheTtlSec(
+            src.friendsListCacheTtlSec,
+            cfg.friendsListCacheTtlSec,
+        );
+    }
+
     // 蔬菜黑名单
     if (Array.isArray(src.plantBlacklist)) {
         cfg.plantBlacklist = src.plantBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
@@ -417,20 +435,29 @@ function normalizeAccountConfig(input, fallback = accountFallbackConfig) {
         cfg.plantDelaySeconds = Math.max(0, Math.min(60, Number(src.plantDelaySeconds) || 0));
     }
 
-    // 秒收取提前时间
-    if (src.fastHarvestAdvanceMs !== undefined && src.fastHarvestAdvanceMs !== null) {
-        cfg.fastHarvestAdvanceMs = Math.max(50, Math.min(1000, Number(src.fastHarvestAdvanceMs) || 200));
+    // 有机化肥购买数量
+    if (src.fertilizerBuyOrganicCount !== undefined && src.fertilizerBuyOrganicCount !== null) {
+        cfg.fertilizerBuyOrganicCount = Math.max(0, Math.min(10000, Number(src.fertilizerBuyOrganicCount) || 0));
     }
 
-    // 化肥购买类型
-    if (src.fertilizerBuyType !== undefined && src.fertilizerBuyType !== null) {
-        const allowedTypes = ['organic', 'normal'];
-        cfg.fertilizerBuyType = allowedTypes.includes(src.fertilizerBuyType) ? src.fertilizerBuyType : 'organic';
+    // 有机化肥自动购买触发阈值
+    if (src.fertilizerBuyOrganicThresholdHours !== undefined && src.fertilizerBuyOrganicThresholdHours !== null) {
+        cfg.fertilizerBuyOrganicThresholdHours = Math.max(0, Math.min(990, Number(src.fertilizerBuyOrganicThresholdHours) || 0));
     }
 
-    // 化肥购买数量
-    if (src.fertilizerBuyCount !== undefined && src.fertilizerBuyCount !== null) {
-        cfg.fertilizerBuyCount = Math.max(0, Math.min(10000, Number(src.fertilizerBuyCount) || 0));
+    // 无机化肥购买数量
+    if (src.fertilizerBuyNormalCount !== undefined && src.fertilizerBuyNormalCount !== null) {
+        cfg.fertilizerBuyNormalCount = Math.max(0, Math.min(10000, Number(src.fertilizerBuyNormalCount) || 0));
+    }
+
+    // 无机化肥自动购买触发阈值
+    if (src.fertilizerBuyNormalThresholdHours !== undefined && src.fertilizerBuyNormalThresholdHours !== null) {
+        cfg.fertilizerBuyNormalThresholdHours = Math.max(0, Math.min(990, Number(src.fertilizerBuyNormalThresholdHours) || 0));
+    }
+
+    // 化肥自动购买检测间隔
+    if (src.fertilizerBuyCheckIntervalMinutes !== undefined && src.fertilizerBuyCheckIntervalMinutes !== null) {
+        cfg.fertilizerBuyCheckIntervalMinutes = Math.max(1, Math.min(1440, Number(src.fertilizerBuyCheckIntervalMinutes) || 30));
     }
 
     // 背包种子优先顺序
@@ -565,7 +592,7 @@ function loadGlobalConfig() {
                     enabled: data.globalWxConfig.enabled !== false,
                     apiBase: String(data.globalWxConfig.apiBase || 'http://127.0.0.1:8059/api').trim(),
                     apiKey: String(data.globalWxConfig.apiKey || '').trim(),
-                    proxyApiUrl: String(data.globalWxConfig.proxyApiUrl || 'https://api.aineishe.com/api/wxnc').trim(),
+                    proxyApiUrl: String(data.globalWxConfig.proxyApiUrl || 'http://127.0.0.1:8059/api').trim(),
                     appId: String(data.globalWxConfig.appId || 'wx5306c5978fdb76e4').trim(),
                     autoAddAccount: data.globalWxConfig.autoAddAccount !== false,
                     userIsolation: data.globalWxConfig.userIsolation !== false,
@@ -655,13 +682,17 @@ function getConfigSnapshot(accountId) {
         friendQuietHours: { ...cfg.friendQuietHours },
         knownFriendGids: [...(cfg.knownFriendGids || [])],
         knownFriendGidSyncCooldownSec: cfg.knownFriendGidSyncCooldownSec,
+        friendsListCacheTtlSec: cfg.friendsListCacheTtlSec,
         friendBlacklist: [...(cfg.friendBlacklist || [])],
         plantBlacklist: [...(cfg.plantBlacklist || [])],
         stealDelaySeconds: Math.max(0, Math.min(300, Number(cfg.stealDelaySeconds) || 0)),
         plantOrderRandom: !!cfg.plantOrderRandom,
         plantDelaySeconds: Math.max(0, Math.min(60, Number(cfg.plantDelaySeconds) || 0)),
-        fertilizerBuyType: cfg.fertilizerBuyType || 'organic',
-        fertilizerBuyCount: Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyCount) || 0)),
+        fertilizerBuyOrganicCount: Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyOrganicCount) || 0)),
+        fertilizerBuyOrganicThresholdHours: Math.max(0, Math.min(990, Number(cfg.fertilizerBuyOrganicThresholdHours) || 0)),
+        fertilizerBuyNormalCount: Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyNormalCount) || 0)),
+        fertilizerBuyNormalThresholdHours: Math.max(0, Math.min(990, Number(cfg.fertilizerBuyNormalThresholdHours) || 0)),
+        fertilizerBuyCheckIntervalMinutes: Math.max(1, Math.min(1440, Number(cfg.fertilizerBuyCheckIntervalMinutes) || 30)),
         ui: { ...globalConfig.ui },
     };
 }
@@ -734,6 +765,13 @@ function applyConfigSnapshot(snapshot, options = {}) {
         );
     }
 
+    if (cfg.friendsListCacheTtlSec !== undefined) {
+        next.friendsListCacheTtlSec = normalizeFriendsListCacheTtlSec(
+            cfg.friendsListCacheTtlSec,
+            next.friendsListCacheTtlSec,
+        );
+    }
+
     // 蔬菜黑名单
     if (Array.isArray(cfg.plantBlacklist)) {
         next.plantBlacklist = cfg.plantBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
@@ -754,15 +792,29 @@ function applyConfigSnapshot(snapshot, options = {}) {
         next.plantDelaySeconds = Math.max(0, Math.min(60, Number(cfg.plantDelaySeconds) || 0));
     }
 
-    // 化肥购买类型
-    if (cfg.fertilizerBuyType !== undefined && cfg.fertilizerBuyType !== null) {
-        const allowedTypes = ['organic', 'normal'];
-        next.fertilizerBuyType = allowedTypes.includes(cfg.fertilizerBuyType) ? cfg.fertilizerBuyType : 'organic';
+    // 有机化肥购买数量
+    if (cfg.fertilizerBuyOrganicCount !== undefined && cfg.fertilizerBuyOrganicCount !== null) {
+        next.fertilizerBuyOrganicCount = Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyOrganicCount) || 0));
     }
 
-    // 化肥购买数量
-    if (cfg.fertilizerBuyCount !== undefined && cfg.fertilizerBuyCount !== null) {
-        next.fertilizerBuyCount = Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyCount) || 0));
+    // 有机化肥自动购买触发阈值
+    if (cfg.fertilizerBuyOrganicThresholdHours !== undefined && cfg.fertilizerBuyOrganicThresholdHours !== null) {
+        next.fertilizerBuyOrganicThresholdHours = Math.max(0, Math.min(990, Number(cfg.fertilizerBuyOrganicThresholdHours) || 0));
+    }
+
+    // 无机化肥购买数量
+    if (cfg.fertilizerBuyNormalCount !== undefined && cfg.fertilizerBuyNormalCount !== null) {
+        next.fertilizerBuyNormalCount = Math.max(0, Math.min(10000, Number(cfg.fertilizerBuyNormalCount) || 0));
+    }
+
+    // 无机化肥自动购买触发阈值
+    if (cfg.fertilizerBuyNormalThresholdHours !== undefined && cfg.fertilizerBuyNormalThresholdHours !== null) {
+        next.fertilizerBuyNormalThresholdHours = Math.max(0, Math.min(990, Number(cfg.fertilizerBuyNormalThresholdHours) || 0));
+    }
+
+    // 化肥自动购买检测间隔
+    if (cfg.fertilizerBuyCheckIntervalMinutes !== undefined && cfg.fertilizerBuyCheckIntervalMinutes !== null) {
+        next.fertilizerBuyCheckIntervalMinutes = Math.max(1, Math.min(1440, Number(cfg.fertilizerBuyCheckIntervalMinutes) || 30));
     }
 
     // 背包种子优先顺序
@@ -904,6 +956,21 @@ function setKnownFriendGidSyncCooldownSec(accountId, sec) {
     return next.knownFriendGidSyncCooldownSec;
 }
 
+function getFriendsListCacheTtlSec(accountId) {
+    return normalizeFriendsListCacheTtlSec(getAccountConfigSnapshot(accountId).friendsListCacheTtlSec);
+}
+
+function setFriendsListCacheTtlSec(accountId, sec) {
+    const current = getAccountConfigSnapshot(accountId);
+    const normalized = normalizeFriendsListCacheTtlSec(sec, current.friendsListCacheTtlSec);
+    const next = normalizeAccountConfig({
+        ...current,
+        friendsListCacheTtlSec: normalized,
+    }, accountFallbackConfig);
+    setAccountConfigSnapshot(accountId, next, true);
+    return next.friendsListCacheTtlSec;
+}
+
 function getFriendBlacklist(accountId) {
     return [...(getAccountConfigSnapshot(accountId).friendBlacklist || [])];
 }
@@ -941,21 +1008,29 @@ function getPlantDelaySeconds(accountId) {
     return Math.max(0, Math.min(60, Number(getAccountConfigSnapshot(accountId).plantDelaySeconds) || 0));
 }
 
-// ============ 秒收取提前时间 ============
-function getFastHarvestAdvanceMs(accountId) {
-    return Math.max(50, Math.min(1000, Number(getAccountConfigSnapshot(accountId).fastHarvestAdvanceMs) || 200));
+// ============ 有机化肥购买数量 ============
+function getFertilizerBuyOrganicCount(accountId) {
+    return Math.max(0, Math.min(10000, Number(getAccountConfigSnapshot(accountId).fertilizerBuyOrganicCount) || 0));
 }
 
-// ============ 化肥购买类型 ============
-function getFertilizerBuyType(accountId) {
-    const cfg = getAccountConfigSnapshot(accountId);
-    const allowedTypes = ['organic', 'normal'];
-    return allowedTypes.includes(cfg.fertilizerBuyType) ? cfg.fertilizerBuyType : 'organic';
+// ============ 有机化肥自动购买触发阈值 ============
+function getFertilizerBuyOrganicThresholdHours(accountId) {
+    return Math.max(0, Math.min(990, Number(getAccountConfigSnapshot(accountId).fertilizerBuyOrganicThresholdHours) || 0));
 }
 
-// ============ 化肥购买数量 ============
-function getFertilizerBuyCount(accountId) {
-    return Math.max(0, Math.min(10000, Number(getAccountConfigSnapshot(accountId).fertilizerBuyCount) || 0));
+// ============ 无机化肥购买数量 ============
+function getFertilizerBuyNormalCount(accountId) {
+    return Math.max(0, Math.min(10000, Number(getAccountConfigSnapshot(accountId).fertilizerBuyNormalCount) || 0));
+}
+
+// ============ 无机化肥自动购买触发阈值 ============
+function getFertilizerBuyNormalThresholdHours(accountId) {
+    return Math.max(0, Math.min(990, Number(getAccountConfigSnapshot(accountId).fertilizerBuyNormalThresholdHours) || 0));
+}
+
+// ============ 化肥自动购买检测间隔 ============
+function getFertilizerBuyCheckIntervalMinutes(accountId) {
+    return Math.max(1, Math.min(1440, Number(getAccountConfigSnapshot(accountId).fertilizerBuyCheckIntervalMinutes) || 30));
 }
 
 // ============ 蔬菜黑名单 ============
@@ -1190,7 +1265,7 @@ const DEFAULT_WX_CONFIG = {
     enabled: true,
     apiBase: 'http://127.0.0.1:8059/api',
     apiKey: '',
-    proxyApiUrl: 'https://api.aineishe.com/api/wxnc',
+    proxyApiUrl: 'http://127.0.0.1:8059/api',
     appId: 'wx5306c5978fdb76e4',
     autoAddAccount: true,
     userIsolation: true,
@@ -1215,17 +1290,6 @@ function setGlobalWxConfig(config) {
     return { ...globalConfig.globalWxConfig };
 }
 
-function getFastHarvestConfig(accountId) {
-    const cfg = getAccountConfigSnapshot(accountId);
-    const automation = cfg.automation || {};
-    return {
-        enabled: !!automation.fast_harvest,
-        advanceMs: Math.max(50, Math.min(1000, Number(cfg.fastHarvestAdvanceMs) || 200)),
-        fertilizerStrategy: automation.fertilizer || 'none',
-        fertilizerSmartSeconds: Math.max(30, Math.min(3600, Number(automation.fertilizer_smart_seconds) || 300)),
-    };
-}
-
 module.exports = {
     getConfigSnapshot,
     applyConfigSnapshot,
@@ -1242,15 +1306,19 @@ module.exports = {
     setKnownFriendGids,
     getKnownFriendGidSyncCooldownSec,
     setKnownFriendGidSyncCooldownSec,
+    getFriendsListCacheTtlSec,
+    setFriendsListCacheTtlSec,
     getFriendBlacklist,
     setFriendBlacklist,
     addFriendToBlacklist,
     getStealDelaySeconds,
     getPlantOrderRandom,
     getPlantDelaySeconds,
-    getFastHarvestAdvanceMs,
-    getFertilizerBuyType,
-    getFertilizerBuyCount,
+    getFertilizerBuyOrganicCount,
+    getFertilizerBuyOrganicThresholdHours,
+    getFertilizerBuyNormalCount,
+    getFertilizerBuyNormalThresholdHours,
+    getFertilizerBuyCheckIntervalMinutes,
     getUI,
     setUITheme,
     getOfflineReminder,
@@ -1283,6 +1351,4 @@ module.exports = {
     getGlobalWxConfig,
     setGlobalWxConfig,
     DEFAULT_WX_CONFIG,
-    // 秒收取配置
-    getFastHarvestConfig,
 };
